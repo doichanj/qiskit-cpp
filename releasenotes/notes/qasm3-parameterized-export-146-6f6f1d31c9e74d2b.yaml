@@ -1,0 +1,40 @@
+---
+features:
+  - |
+    `QuantumCircuit::to_qasm3()` now uses a dedicated OpenQASM 3 exporter and
+    declares symbolic circuit parameters as OpenQASM 3 `input float[64]`
+    values before emitting parameterized gate operations. Generated input and
+    register names are adjusted when needed to avoid OpenQASM 3 global symbol
+    conflicts, including conflicts with custom gate definitions emitted by the
+    exporter. The exporter also emits valid OpenQASM 3 for controlled-U1,
+    controlled-U3, and global phase operations.
+  - |
+    Added `QuantumCircuit::parameter_symbols()`, which returns the sorted list
+    of unique parameter symbol names used in the circuit. The OpenQASM 3
+    exporter consumes this list instead of collecting parameters on its own.
+    This is currently a stub: the authoritative parameter table lives on the
+    Rust side and there is no C-API yet to enumerate the symbols (only
+    `qk_circuit_num_param_symbols`, the count), so the names are derived from
+    the parameter expressions and the implementation is expected to be replaced
+    by a C-API when one becomes available. Until then, parameter names must be
+    recoverable as OpenQASM identifier tokens; the stub raises an exception if
+    the harvested names do not match the Rust-side parameter count.
+fixes:
+  - |
+    Fixed `QuantumCircuit::compose()` reading each instruction's operation kind
+    from the destination circuit instead of the source circuit. Composing into a
+    circuit that has fewer instructions than the source could read past the end
+    of the destination, and otherwise mis-classified instructions. This also
+    ensures composed parameterized circuits export correctly with
+    `to_qasm3()`.
+issues:
+  - |
+    `QuantumCircuit::parameter_symbols()` (and therefore the OpenQASM 3
+    exporter) identifies parameters by their original symbol name. Distinct
+    `Parameter` objects that share a name cannot be disambiguated, because
+    qiskit-cpp cannot yet identify parameters by UUID through the C-API. Such
+    duplicates collapse onto a single shared symbol of that name rather than
+    being rejected: detecting them would require copying the circuit on every
+    parameterized gate insertion, which is too expensive. The exported
+    OpenQASM 3 stays valid but binds the colliding gates to the same `input`
+    value, so use a unique name per distinct parameter.

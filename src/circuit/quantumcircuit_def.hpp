@@ -58,6 +58,7 @@ namespace circuit
 
 class ControlFlowOp;
 class IfElseOp;
+class Qasm3Exporter;
 
 static Parameter null_param;
 
@@ -65,6 +66,7 @@ static Parameter null_param;
 /// @brief Qiskit representation of a quantum circuit.
 class QuantumCircuit
 {
+	friend class Qasm3Exporter;
 protected:
 	uint_t num_qubits_;			// number of qubits
 	uint_t num_clbits_;			// number of classical bits
@@ -79,6 +81,26 @@ protected:
 
 	reg_t qubit_map_;									 // qubit map caused by transpiling
 	std::vector<std::pair<uint_t, uint_t>> measure_map_; // a list of pair of qubit and clbit for measure
+
+	class ScopedCircuitInstruction {
+		QkCircuitInstruction instruction_;
+
+	public:
+		ScopedCircuitInstruction(const QkCircuit *circuit, const uint_t index)
+		{
+			qk_circuit_get_instruction(circuit, index, &instruction_);
+		}
+		~ScopedCircuitInstruction()
+		{
+			qk_circuit_instruction_clear(&instruction_);
+		}
+		ScopedCircuitInstruction(const ScopedCircuitInstruction &) = delete;
+		ScopedCircuitInstruction &operator=(const ScopedCircuitInstruction &) = delete;
+		QkCircuitInstruction &get(void)
+		{
+			return instruction_;
+		}
+	};
 public:
 	/// @brief Create a new QuantumCircuit
 	QuantumCircuit() {}
@@ -1345,21 +1367,21 @@ public:
 
 		auto name_map = get_standard_gate_name_mapping();
 		for (uint_t i = 0; i < nops; i++) {
-			QkCircuitInstruction *op = new QkCircuitInstruction;
-			qk_circuit_get_instruction(circ.rust_circuit_.get(), i, op);
+			ScopedCircuitInstruction instruction(circ.rust_circuit_.get(), i);
+			QkCircuitInstruction &op = instruction.get();
 
-			std::vector<std::uint32_t> vqubits(op->num_qubits);
+			std::vector<std::uint32_t> vqubits(op.num_qubits);
 			std::vector<std::uint32_t> vclbits;
-			for (uint_t j = 0; j < op->num_qubits; j++) {
-				vqubits[j] = (std::uint32_t)qubits[op->qubits[j]];
+			for (uint_t j = 0; j < op.num_qubits; j++) {
+				vqubits[j] = (std::uint32_t)qubits[op.qubits[j]];
 			}
-			if (op->num_clbits > 0) {
-				vclbits.resize(op->num_clbits);
-				for (uint_t j = 0; j < op->num_clbits; j++) {
-					vclbits[j] = (std::uint32_t)clbits[op->clbits[j]];
+			if (op.num_clbits > 0) {
+				vclbits.resize(op.num_clbits);
+				for (uint_t j = 0; j < op.num_clbits; j++) {
+					vclbits[j] = (std::uint32_t)clbits[op.clbits[j]];
 				}
 			}
-			QkOperationKind kind = qk_circuit_instruction_kind(rust_circuit_.get(), i);
+			QkOperationKind kind = qk_circuit_instruction_kind(circ.rust_circuit_.get(), i);
 			if (kind == QkOperationKind_Measure) {
 				qk_circuit_measure(rust_circuit_.get(), vqubits[0], vclbits[0]);
 			} else if (kind == QkOperationKind_Reset) {
@@ -1367,11 +1389,10 @@ public:
 			} else if (kind == QkOperationKind_Barrier) {
 				qk_circuit_barrier(rust_circuit_.get(), vqubits.data(), (uint32_t)vqubits.size());
 			} else if (kind == QkOperationKind_Gate) {
-				qk_circuit_parameterized_gate(rust_circuit_.get(), name_map[op->name].gate_map(), vqubits.data(), op->params);
+				qk_circuit_parameterized_gate(rust_circuit_.get(), name_map[op.name].gate_map(), vqubits.data(), op.params);
 			} else if (kind == QkOperationKind_Unitary) {
 				// TO DO : how we can get unitary matrix from Rust ?
 			}
-			qk_circuit_instruction_clear(op);
 		}
 
 		for (auto m : circ.measure_map_) {
@@ -1551,382 +1572,27 @@ public:
 
 	// qasm3
 
+	/// @brief Get the list of parameter symbol names used in the circuit.
+	/// @return A sorted list of unique parameter symbol names.
+	/// @note This is a stub. The authoritative parameter table lives on the
+	///   Rust side and there is currently no C-API to enumerate the symbols
+	///   (only ``qk_circuit_num_param_symbols`` exposes the count), so the
+	///   names are derived from the parameter expressions here. Replace this
+	///   implementation with a C-API once one is available. Until then, names
+	///   must be recoverable as OpenQASM identifier tokens; this method throws
+	///   if the harvested names do not match the Rust-side parameter count.
+	/// @note Limitation: distinct ``Parameter`` objects that share the same name
+	///   are treated as a single symbol. qiskit-cpp cannot disambiguate
+	///   Parameters by UUID through the C-API, so this case is neither detected
+	///   nor rejected; the colliding gates simply reference one shared symbol of
+	///   that name in the exported OpenQASM 3. Use a unique name per distinct
+	///   parameter. The original symbol name is preserved (the same name keyed
+	///   by SamplerPub / EstimatorPub parameter sets).
+	std::vector<std::string> parameter_symbols(void) const;
+
 	/// @brief Serialize a QuantumCircuit object as an OpenQASM3 string.
 	/// @return An OpenQASM3 string.
-	std::string to_qasm3(void)
-	{
-		add_pending_control_flow_op();
-
-		std::stringstream qasm3;
-		qasm3 << std::setprecision(18);
-		qasm3 << "OPENQASM 3.0;" << std::endl;
-		qasm3 << "include \"stdgates.inc\";" << std::endl;
-
-		auto name_map = get_standard_gate_name_mapping();
-		// add header for non-standard gates
-		bool cs = false;
-		bool sxdg = false;
-		QkOpCounts opcounts = qk_circuit_count_ops(rust_circuit_.get());
-		for (int i = 0; i < opcounts.len; i++) {
-			if (opcounts.data[i].count != 0) {
-				auto op = name_map[opcounts.data[i].name].gate_map();
-				switch (op)
-				{
-				case QkGate_R:
-					qasm3 << "gate r(p0, p1) _gate_q_0 {" << std::endl;
-					qasm3 << "  U(p0, -pi/2 + p1, pi/2 - p1) _gate_q_0;" << std::endl;
-					qasm3 << "}" << std::endl;
-					break;
-				case QkGate_SXdg:
-				case QkGate_RYY:
-				case QkGate_XXPlusYY:
-				case QkGate_XXMinusYY:
-					if (!sxdg)
-					{
-						qasm3 << "gate sxdg _gate_q_0 {" << std::endl;
-						qasm3 << "  s _gate_q_0;" << std::endl;
-						qasm3 << "  h _gate_q_0;" << std::endl;
-						qasm3 << "  s _gate_q_0;" << std::endl;
-						qasm3 << "}" << std::endl;
-						sxdg = true;
-					}
-					if (op == QkGate_RYY)
-					{
-						qasm3 << "gate ryy(p0) _gate_q_0, _gate_q_1 {" << std::endl;
-						qasm3 << "  sxdg _gate_q_0;" << std::endl;
-						qasm3 << "  sxdg _gate_q_1;" << std::endl;
-						qasm3 << "  cx _gate_q_0, _gate_q_1;" << std::endl;
-						qasm3 << "  rz(p0) _gate_q_1;" << std::endl;
-						qasm3 << "  cx _gate_q_0, _gate_q_1;" << std::endl;
-						qasm3 << "  sx _gate_q_0;" << std::endl;
-						qasm3 << "  sx _gate_q_1;" << std::endl;
-						qasm3 << "}" << std::endl;
-					}
-					if (op == QkGate_XXPlusYY)
-					{
-						qasm3 << "gate xx_plus_yy(p0, p1) _gate_q_0, _gate_q_1 {" << std::endl;
-						qasm3 << "  rz(p1) _gate_q_0;" << std::endl;
-						qasm3 << "  sdg _gate_q_1;" << std::endl;
-						qasm3 << "  sx _gate_q_1;" << std::endl;
-						qasm3 << "  s _gate_q_1;" << std::endl;
-						qasm3 << "  s _gate_q_0;" << std::endl;
-						qasm3 << "  cx _gate_q_1, _gate_q_0;" << std::endl;
-						qasm3 << "  ry((-0.5)*p0) _gate_q_1;" << std::endl;
-						qasm3 << "  ry((-0.5)*p0) _gate_q_0;" << std::endl;
-						qasm3 << "  cx _gate_q_1, _gate_q_0;" << std::endl;
-						qasm3 << "  sdg _gate_q_0;" << std::endl;
-						qasm3 << "  sdg _gate_q_1;" << std::endl;
-						qasm3 << "  sxdg _gate_q_1;" << std::endl;
-						qasm3 << "  s _gate_q_1;" << std::endl;
-						qasm3 << "  rz(-p1) _gate_q_0;" << std::endl;
-						qasm3 << "}" << std::endl;
-					}
-					if (op == QkGate_XXMinusYY)
-					{
-						qasm3 << "gate xx_minus_yy(p0, p1) _gate_q_0, _gate_q_1 {" << std::endl;
-						qasm3 << "  rz(-p1) _gate_q_1;" << std::endl;
-						qasm3 << "  sdg _gate_q_0;" << std::endl;
-						qasm3 << "  sx _gate_q_0;" << std::endl;
-						qasm3 << "  s _gate_q_0;" << std::endl;
-						qasm3 << "  s _gate_q_1;" << std::endl;
-						qasm3 << "  cx _gate_q_0, _gate_q_1;" << std::endl;
-						qasm3 << "  ry(0.5*p0) _gate_q_0;" << std::endl;
-						qasm3 << "  ry((-0.5)*p0) _gate_q_1;" << std::endl;
-						qasm3 << "  cx _gate_q_0, _gate_q_1;" << std::endl;
-						qasm3 << "  sdg _gate_q_1;" << std::endl;
-						qasm3 << "  sdg _gate_q_0;" << std::endl;
-						qasm3 << "  sxdg _gate_q_0;" << std::endl;
-						qasm3 << "  s _gate_q_0;" << std::endl;
-						qasm3 << "  rz(p1) _gate_q_1;" << std::endl;
-						qasm3 << "}" << std::endl;
-					}
-					break;
-				case QkGate_DCX:
-					qasm3 << "gate dcx _gate_q_0, _gate_q_1 {" << std::endl;
-					qasm3 << "  cx _gate_q_0, _gate_q_1;" << std::endl;
-					qasm3 << "  cx _gate_q_1, _gate_q_0;" << std::endl;
-					qasm3 << "}" << std::endl;
-					break;
-				case QkGate_ECR:
-					qasm3 << "gate ecr _gate_q_0, _gate_q_1 {" << std::endl;
-					qasm3 << "  s _gate_q_0;" << std::endl;
-					qasm3 << "  sx _gate_q_1;" << std::endl;
-					qasm3 << "  cx _gate_q_0, _gate_q_1;" << std::endl;
-					qasm3 << "  x _gate_q_0;" << std::endl;
-					qasm3 << "}" << std::endl;
-					break;
-				case QkGate_ISwap:
-					qasm3 << "gate iswap _gate_q_0, _gate_q_1 {" << std::endl;
-					qasm3 << "  s _gate_q_0;" << std::endl;
-					qasm3 << "  s _gate_q_1;" << std::endl;
-					qasm3 << "  h _gate_q_0;" << std::endl;
-					qasm3 << "  cx _gate_q_0, _gate_q_1;" << std::endl;
-					qasm3 << "  cx _gate_q_1, _gate_q_0;" << std::endl;
-					qasm3 << "  h _gate_q_1;" << std::endl;
-					qasm3 << "}" << std::endl;
-					break;
-				case QkGate_CSX:
-				case QkGate_CS:
-					if (!cs)
-					{
-						qasm3 << "gate cs _gate_q_0, _gate_q_1 {" << std::endl;
-						qasm3 << "  t _gate_q_0;" << std::endl;
-						qasm3 << "  cx _gate_q_0, _gate_q_1;" << std::endl;
-						qasm3 << "  tdg _gate_q_1;" << std::endl;
-						qasm3 << "  cx _gate_q_0, _gate_q_1;" << std::endl;
-						qasm3 << "  t _gate_q_1;" << std::endl;
-						qasm3 << "}" << std::endl;
-						cs = true;
-					}
-					if (op == QkGate_CSX)
-					{
-						qasm3 << "gate csx _gate_q_0, _gate_q_1 {" << std::endl;
-						qasm3 << "  h _gate_q_1;" << std::endl;
-						qasm3 << "  cs _gate_q_0, _gate_q_1;" << std::endl;
-						qasm3 << "  h _gate_q_1;" << std::endl;
-						qasm3 << "}" << std::endl;
-					}
-					break;
-				case QkGate_CSdg:
-					qasm3 << "gate csdg _gate_q_0, _gate_q_1 {" << std::endl;
-					qasm3 << "  tdg _gate_q_0;" << std::endl;
-					qasm3 << "  cx _gate_q_0, _gate_q_1;" << std::endl;
-					qasm3 << "  t _gate_q_1;" << std::endl;
-					qasm3 << "  cx _gate_q_0, _gate_q_1;" << std::endl;
-					qasm3 << "  tdg _gate_q_1;" << std::endl;
-					qasm3 << "}" << std::endl;
-					break;
-				case QkGate_CCZ:
-					qasm3 << "gate ccz _gate_q_0, _gate_q_1, _gate_q_2 {" << std::endl;
-					qasm3 << "  h _gate_q_2;" << std::endl;
-					qasm3 << "  ccx _gate_q_0, _gate_q_1, _gate_q_2;" << std::endl;
-					qasm3 << "  h _gate_q_2;" << std::endl;
-					qasm3 << "}" << std::endl;
-					break;
-				case QkGate_RXX:
-					qasm3 << "gate rxx(p0) _gate_q_0, _gate_q_1 {" << std::endl;
-					qasm3 << "  h _gate_q_0;" << std::endl;
-					qasm3 << "  h _gate_q_1;" << std::endl;
-					qasm3 << "  cx _gate_q_0, _gate_q_1;" << std::endl;
-					qasm3 << "  rz(p0) _gate_q_1;" << std::endl;
-					qasm3 << "  cx _gate_q_0, _gate_q_1;" << std::endl;
-					qasm3 << "  h _gate_q_1;" << std::endl;
-					qasm3 << "  h _gate_q_0;" << std::endl;
-					qasm3 << "}" << std::endl;
-					break;
-				case QkGate_RZX:
-					qasm3 << "gate rzx(p0) _gate_q_0, _gate_q_1 {" << std::endl;
-					qasm3 << "  h _gate_q_1;" << std::endl;
-					qasm3 << "  cx _gate_q_0, _gate_q_1;" << std::endl;
-					qasm3 << "  rz(p0) _gate_q_1;" << std::endl;
-					qasm3 << "  cx _gate_q_0, _gate_q_1;" << std::endl;
-					qasm3 << "  h _gate_q_1;" << std::endl;
-					qasm3 << "}" << std::endl;
-					break;
-				case QkGate_RZZ:
-					qasm3 << "gate rzz(p0) _gate_q_0, _gate_q_1 {" << std::endl;
-					qasm3 << "  cx _gate_q_0, _gate_q_1;" << std::endl;
-					qasm3 << "  rz(p0) _gate_q_1;" << std::endl;
-					qasm3 << "  cx _gate_q_0, _gate_q_1;" << std::endl;
-					qasm3 << "}" << std::endl;
-					break;
-				case QkGate_RCCX:
-					qasm3 << "gate rccx _gate_q_0, _gate_q_1, _gate_q_2 {" << std::endl;
-					qasm3 << "  h _gate_q_2;" << std::endl;
-					qasm3 << "  t _gate_q_2;" << std::endl;
-					qasm3 << "  cx _gate_q_1, _gate_q_2;" << std::endl;
-					qasm3 << "  tdg _gate_q_2;" << std::endl;
-					qasm3 << "  cx _gate_q_0, _gate_q_2;" << std::endl;
-					qasm3 << "  t _gate_q_2;" << std::endl;
-					qasm3 << "  cx _gate_q_1, _gate_q_2;" << std::endl;
-					qasm3 << "  tdg _gate_q_2;" << std::endl;
-					qasm3 << "  h _gate_q_2;" << std::endl;
-					qasm3 << "}" << std::endl;
-					break;
-				case QkGate_C3X:
-					qasm3 << "gate mcx _gate_q_0, _gate_q_1, _gate_q_2, _gate_q_3 {" << std::endl;
-					qasm3 << "  h _gate_q_3;" << std::endl;
-					qasm3 << "  p(pi/8) _gate_q_0;" << std::endl;
-					qasm3 << "  p(pi/8) _gate_q_1;" << std::endl;
-					qasm3 << "  p(pi/8) _gate_q_2;" << std::endl;
-					qasm3 << "  p(pi/8) _gate_q_3;" << std::endl;
-					qasm3 << "  cx _gate_q_0, _gate_q_1;" << std::endl;
-					qasm3 << "  p(-pi/8) _gate_q_1;" << std::endl;
-					qasm3 << "  cx _gate_q_0, _gate_q_1;" << std::endl;
-					qasm3 << "  cx _gate_q_1, _gate_q_2;" << std::endl;
-					qasm3 << "  p(-pi/8) _gate_q_2;" << std::endl;
-					qasm3 << "  cx _gate_q_0, _gate_q_2;" << std::endl;
-					qasm3 << "  p(pi/8) _gate_q_2;" << std::endl;
-					qasm3 << "  cx _gate_q_1, _gate_q_2;" << std::endl;
-					qasm3 << "  p(-pi/8) _gate_q_2;" << std::endl;
-					qasm3 << "  cx _gate_q_0, _gate_q_2;" << std::endl;
-					qasm3 << "  cx _gate_q_2, _gate_q_3;" << std::endl;
-					qasm3 << "  p(-pi/8) _gate_q_3;" << std::endl;
-					qasm3 << "  cx _gate_q_1, _gate_q_3;" << std::endl;
-					qasm3 << "  p(pi/8) _gate_q_3;" << std::endl;
-					qasm3 << "  cx _gate_q_2, _gate_q_3;" << std::endl;
-					qasm3 << "  p(-pi/8) _gate_q_3;" << std::endl;
-					qasm3 << "  cx _gate_q_0, _gate_q_3;" << std::endl;
-					qasm3 << "  p(pi/8) _gate_q_3;" << std::endl;
-					qasm3 << "  cx _gate_q_2, _gate_q_3;" << std::endl;
-					qasm3 << "  p(-pi/8) _gate_q_3;" << std::endl;
-					qasm3 << "  cx _gate_q_1, _gate_q_3;" << std::endl;
-					qasm3 << "  p(pi/8) _gate_q_3;" << std::endl;
-					qasm3 << "  cx _gate_q_2, _gate_q_3;" << std::endl;
-					qasm3 << "  p(-pi/8) _gate_q_3;" << std::endl;
-					qasm3 << "  cx _gate_q_0, _gate_q_3;" << std::endl;
-					qasm3 << "  h _gate_q_3;" << std::endl;
-					qasm3 << "}" << std::endl;
-					break;
-				case QkGate_C3SX:
-					qasm3 << "gate c3sx _gate_q_0, _gate_q_1, _gate_q_2, _gate_q_3 {" << std::endl;
-					qasm3 << "  h _gate_q_3;" << std::endl;
-					qasm3 << "  cp(pi/8) _gate_q_0, _gate_q_3;" << std::endl;
-					qasm3 << "  h _gate_q_3;" << std::endl;
-					qasm3 << "  cx _gate_q_0, _gate_q_1;" << std::endl;
-					qasm3 << "  h _gate_q_3;" << std::endl;
-					qasm3 << "  cp(-pi/8) _gate_q_1, _gate_q_3;" << std::endl;
-					qasm3 << "  h _gate_q_3;" << std::endl;
-					qasm3 << "  cx _gate_q_0, _gate_q_1;" << std::endl;
-					qasm3 << "  h _gate_q_3;" << std::endl;
-					qasm3 << "  cp(pi/8) _gate_q_1, _gate_q_3;" << std::endl;
-					qasm3 << "  h _gate_q_3;" << std::endl;
-					qasm3 << "  cx _gate_q_1, _gate_q_2;" << std::endl;
-					qasm3 << "  h _gate_q_3;" << std::endl;
-					qasm3 << "  cp(-pi/8) _gate_q_2, _gate_q_3;" << std::endl;
-					qasm3 << "  h _gate_q_3;" << std::endl;
-					qasm3 << "  cx _gate_q_0, _gate_q_2;" << std::endl;
-					qasm3 << "  h _gate_q_3;" << std::endl;
-					qasm3 << "  cp(pi/8) _gate_q_2, _gate_q_3;" << std::endl;
-					qasm3 << "  h _gate_q_3;" << std::endl;
-					qasm3 << "  cx _gate_q_1, _gate_q_2;" << std::endl;
-					qasm3 << "  h _gate_q_3;" << std::endl;
-					qasm3 << "  cp(-pi/8) _gate_q_2, _gate_q_3;" << std::endl;
-					qasm3 << "  h _gate_q_3;" << std::endl;
-					qasm3 << "  cx _gate_q_0, _gate_q_2;" << std::endl;
-					qasm3 << "  h _gate_q_3;" << std::endl;
-					qasm3 << "  cp(pi/8) _gate_q_2, _gate_q_3;" << std::endl;
-					qasm3 << "  h _gate_q_3;" << std::endl;
-					qasm3 << "}" << std::endl;
-					break;
-				case QkGate_RC3X:
-					qasm3 << "gate rcccx _gate_q_0, _gate_q_1, _gate_q_2, _gate_q_3 {" << std::endl;
-					qasm3 << "  h _gate_q_3;" << std::endl;
-					qasm3 << "  t _gate_q_3;" << std::endl;
-					qasm3 << "  cx _gate_q_2, _gate_q_3;" << std::endl;
-					qasm3 << "  tdg _gate_q_3;" << std::endl;
-					qasm3 << "  h _gate_q_3;" << std::endl;
-					qasm3 << "  cx _gate_q_0, _gate_q_3;" << std::endl;
-					qasm3 << "  t _gate_q_3;" << std::endl;
-					qasm3 << "  cx _gate_q_1, _gate_q_3;" << std::endl;
-					qasm3 << "  tdg _gate_q_3;" << std::endl;
-					qasm3 << "  cx _gate_q_0, _gate_q_3;" << std::endl;
-					qasm3 << "  t _gate_q_3;" << std::endl;
-					qasm3 << "  cx _gate_q_1, _gate_q_3;" << std::endl;
-					qasm3 << "  tdg _gate_q_3;" << std::endl;
-					qasm3 << "  h _gate_q_3;" << std::endl;
-					qasm3 << "  t _gate_q_3;" << std::endl;
-					qasm3 << "  cx _gate_q_2, _gate_q_3;" << std::endl;
-					qasm3 << "  tdg _gate_q_3;" << std::endl;
-					qasm3 << "  h _gate_q_3;" << std::endl;
-					qasm3 << "}" << std::endl;
-					break;
-				case QkGate_CU1:
-					qasm3 << "gate cu1(p0) _gate_q_0, _gate_q_1 {" << std::endl;
-					qasm3 << "  cp(p0) _gate_q_0 _gate_q_1;" << std::endl;
-					qasm3 << "}" << std::endl;
-					break;
-				case QkGate_CU3:
-					qasm3 << "gate cu3(p0, p1, p2) _gate_q_0, _gate_q_1 {" << std::endl;
-					qasm3 << "  cu(p0, p1, p2, 0) _gate_q_0 _gate_q_1;" << std::endl;
-					qasm3 << "}" << std::endl;
-					break;
-				default:
-					break;
-				}
-			}
-		}
-		qk_opcounts_clear(&opcounts);
-
-		// save ops
-		uint_t nops;
-		nops = qk_circuit_num_instructions(rust_circuit_.get());
-
-		// Declare registers
-		// After transpilation, qubit registers will be mapped to physical registers,
-		// so we need to combine them in a single quantum register "q" for ordinary
-		// circuits. Transpiled circuits should use physical qubit references.
-		const std::string qreg_name = "q";
-		const bool physical_qubits = !qubit_map_.empty();
-		auto qubit_ref = [physical_qubits, &qreg_name](uint_t index) -> std::string
-		{
-			if (physical_qubits) {
-				return std::string("$") + std::to_string(index);
-			}
-			return qreg_name + "[" + std::to_string(index) + "]";
-		};
-
-		if (!physical_qubits) {
-			qasm3 << "qubit[" << num_qubits() << "] " << qreg_name << ";" << std::endl;
-		}
-		for(const auto& creg : cregs_) {
-			if (creg.size() == 0) {
-				continue;
-			}
-			qasm3 << "bit[" << creg.size() << "] " << creg.name() << ";" << std::endl;
-		}
-
-		auto recover_reg_data = [this](uint_t index) -> std::pair<std::string, uint_t>
-		{
-			auto it = std::upper_bound(cregs_.begin(), cregs_.end(), index,
-					[](uint_t v, const ClassicalRegister& reg) { return v < reg.base_index(); });
-			assert(it != cregs_.begin());
-			it = std::prev(it);
-			return std::make_pair(it->name(), index - it->base_index());
-		};
-
-		for (uint_t i = 0; i < nops; i++) {
-			QkCircuitInstruction *op = new QkCircuitInstruction;
-			qk_circuit_get_instruction(rust_circuit_.get(), i, op);
-			if (op->num_clbits > 0) {
-				if (op->num_qubits == op->num_clbits) {
-					for (uint_t j = 0; j < op->num_qubits; j++) {
-						const auto creg_data = recover_reg_data(op->clbits[j]);
-						qasm3 << creg_data.first << "[" << creg_data.second << "] = " << op->name << " " << qubit_ref(op->qubits[j]) << ";" << std::endl;
-					}
-				}
-			} else {
-				if (strcmp(op->name, "u") == 0) {
-					qasm3 << "U";
-				} else {
-					qasm3 << op->name;
-				}
-				if (op->num_params > 0) {
-					qasm3 << "(";
-					for (uint_t j = 0; j < op->num_params; j++) {
-						char* param = qk_param_str(op->params[j]);
-						qasm3 << param;
-						qk_str_free(param);
-						if (j != op->num_params - 1)
-							qasm3 << ", ";
-					}
-					qasm3 << ")";
-				}
-				if (op->num_qubits > 0) {
-					qasm3 << " ";
-					for (uint_t j = 0; j < op->num_qubits; j++) {
-						qasm3 << qubit_ref(op->qubits[j]);
-						if (j != op->num_qubits - 1)
-							qasm3 << ", ";
-					}
-				}
-				qasm3 << ";" << std::endl;
-			}
-			qk_circuit_instruction_clear(op);
-		}
-
-		return qasm3.str();
-	}
+	std::string to_qasm3(void);
 
 	/// @brief print circuit (this is for debug)
 	void print(void) const
