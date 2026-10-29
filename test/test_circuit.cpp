@@ -12,7 +12,11 @@
 
 #include <iostream>
 #include <cstdint>
+#include <cstdio>
+#include <fstream>
+#include <iterator>
 #include <stdexcept>
+#include <vector>
 
 #include "common.hpp"
 
@@ -1207,6 +1211,548 @@ static int test_to_qasm3_append_parameterized(void) {
     return Ok;
 }
 
+#if QISKIT_CPP_HAS_QPY
+// The QPY file header is big-endian and laid out as the b"QISKIT" magic
+// string, a format version byte, the 3-byte Qiskit version that wrote it, and
+// the number of serialized programs as a u64. See the QPY specification for the
+// rest of the layout.
+static const char qpy_magic[] = {'Q', 'I', 'S', 'K', 'I', 'T'};
+static const std::size_t qpy_version_offset = sizeof(qpy_magic);
+static const std::size_t qpy_num_programs_offset = qpy_version_offset + 1 + 3;
+static const std::size_t qpy_header_size = qpy_num_programs_offset + 8;
+
+static int check_qpy_header(const char *test, const std::vector<std::uint8_t> &payload,
+                            const std::uint8_t expected_version,
+                            const std::uint64_t expected_num_circuits) {
+    if (payload.size() < qpy_header_size) {
+        std::cerr << "  " << test << " test : payload is too short to hold a QPY header ("
+            << payload.size() << " bytes)" << std::endl;
+        return EqualityError;
+    }
+    for (std::size_t i = 0; i < sizeof(qpy_magic); i++) {
+        if (payload[i] != static_cast<std::uint8_t>(qpy_magic[i])) {
+            std::cerr << "  " << test << " test : payload does not start with the QPY magic"
+                << std::endl;
+            return EqualityError;
+        }
+    }
+    const std::uint8_t version = payload[qpy_version_offset];
+    if (expected_version != 0 && version != expected_version) {
+        std::cerr << "  " << test << " test : QPY version " << static_cast<unsigned>(expected_version)
+            << " != " << static_cast<unsigned>(version) << std::endl;
+        return EqualityError;
+    }
+    if (version < QuantumCircuit::qpy_write_min_version()) {
+        std::cerr << "  " << test << " test : QPY version " << static_cast<unsigned>(version)
+            << " is below the writable minimum "
+            << static_cast<unsigned>(QuantumCircuit::qpy_write_min_version()) << std::endl;
+        return EqualityError;
+    }
+
+    std::uint64_t num_programs = 0;
+    for (std::size_t i = 0; i < 8; i++) {
+        num_programs = (num_programs << 8) | payload[qpy_num_programs_offset + i];
+    }
+    if (num_programs != expected_num_circuits) {
+        std::cerr << "  " << test << " test : QPY holds " << num_programs << " circuits, expected "
+            << expected_num_circuits << std::endl;
+        return EqualityError;
+    }
+    return Ok;
+}
+
+static QuantumCircuit make_bell_circuit(void) {
+    auto circ = QuantumCircuit(2, 2);
+    circ.h(0);
+    circ.cx(0, 1);
+    circ.measure(0, 0);
+    circ.measure(1, 1);
+    return circ;
+}
+
+static int test_to_qpy(void) {
+    auto circ = make_bell_circuit();
+    const auto payload = circ.to_qpy();
+    return check_qpy_header("to_qpy", payload, 0, 1);
+}
+
+static int test_to_qpy_with_version(void) {
+    auto circ = make_bell_circuit();
+    const std::uint8_t version = QuantumCircuit::qpy_write_min_version();
+    const auto payload = circ.to_qpy(version);
+    return check_qpy_header("to_qpy_with_version", payload, version, 1);
+}
+
+static int test_to_qpy_parameterized(void) {
+    auto circ = QuantumCircuit(1, 0);
+    auto theta = Parameter("theta");
+    circ.rx(theta, 0);
+
+    // QPY carries symbolic parameters, unlike the OpenQASM 3 exporter which has
+    // to recover their names from the parameter expressions.
+    const auto payload = circ.to_qpy();
+    return check_qpy_header("to_qpy_parameterized", payload, 0, 1);
+}
+
+static int test_to_qpy_multiple_circuits(void) {
+    std::vector<QuantumCircuit> circuits;
+    circuits.push_back(make_bell_circuit());
+    circuits.push_back(QuantumCircuit(3, 3));
+
+    const auto payload = QuantumCircuit::to_qpy(circuits);
+    return check_qpy_header("to_qpy_multiple_circuits", payload, 0, 2);
+}
+
+static int test_to_qpy_empty_list(void) {
+    std::vector<QuantumCircuit> circuits;
+    const auto payload = QuantumCircuit::to_qpy(circuits);
+    return check_qpy_header("to_qpy_empty_list", payload, 0, 0);
+}
+
+static int test_export_qpy(void) {
+    auto circ = make_bell_circuit();
+    const std::string filename = "test_export_qpy.qpy";
+    std::remove(filename.c_str());
+
+    circ.export_qpy(filename);
+
+    std::ifstream file(filename.c_str(), std::ios::binary);
+    if (!file) {
+        std::cerr << "  export_qpy test : \"" << filename << "\" was not created" << std::endl;
+        return RuntimeError;
+    }
+    const std::vector<std::uint8_t> payload(
+        (std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    file.close();
+    std::remove(filename.c_str());
+
+    const int result = check_qpy_header("export_qpy", payload, 0, 1);
+    if (result != Ok) {
+        return result;
+    }
+
+    // The file and the in-memory payload are produced by the same serializer,
+    // so they must agree byte for byte.
+    if (payload != circ.to_qpy()) {
+        std::cerr << "  export_qpy test : file contents differ from to_qpy()" << std::endl;
+        return EqualityError;
+    }
+    return Ok;
+}
+
+static int test_export_qpy_multiple_circuits(void) {
+    std::vector<QuantumCircuit> circuits;
+    circuits.push_back(make_bell_circuit());
+    circuits.push_back(QuantumCircuit(3, 3));
+    const std::string filename = "test_export_qpy_multi.qpy";
+    std::remove(filename.c_str());
+
+    QuantumCircuit::export_qpy(circuits, filename);
+
+    std::ifstream file(filename.c_str(), std::ios::binary);
+    if (!file) {
+        std::cerr << "  export_qpy_multiple_circuits test : \"" << filename
+            << "\" was not created" << std::endl;
+        return RuntimeError;
+    }
+    const std::vector<std::uint8_t> payload(
+        (std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    file.close();
+    std::remove(filename.c_str());
+
+    return check_qpy_header("export_qpy_multiple_circuits", payload, 0, 2);
+}
+
+static int test_export_qpy_bad_path(void) {
+    auto circ = make_bell_circuit();
+    // A path whose parent directory does not exist cannot be written.
+    const std::string filename = "qpy_missing_directory/circuit.qpy";
+
+    try {
+        circ.export_qpy(filename);
+    } catch (const std::runtime_error &err) {
+        const std::string message = err.what();
+        if (message.find("QPY export failed") == std::string::npos) {
+            std::cerr << "  export_qpy_bad_path test : unexpected error: " << message << std::endl;
+            return EqualityError;
+        }
+        if (message.find(filename) == std::string::npos) {
+            std::cerr << "  export_qpy_bad_path test : error does not name the path: "
+                << message << std::endl;
+            return EqualityError;
+        }
+        return Ok;
+    }
+
+    std::cerr << "  export_qpy_bad_path test : expected runtime_error" << std::endl;
+    return RuntimeError;
+}
+
+static int test_from_qpy_round_trip(void) {
+    auto circ = make_bell_circuit();
+    const auto loaded = QuantumCircuit::from_qpy(circ.to_qpy());
+
+    if (loaded.size() != 1) {
+        std::cerr << "  from_qpy_round_trip test : loaded " << loaded.size()
+            << " circuits, expected 1" << std::endl;
+        return EqualityError;
+    }
+    if (loaded[0].num_qubits() != circ.num_qubits()
+        || loaded[0].num_clbits() != circ.num_clbits()) {
+        std::cerr << "  from_qpy_round_trip test : loaded " << loaded[0].num_qubits()
+            << " qubits / " << loaded[0].num_clbits() << " clbits, expected "
+            << circ.num_qubits() << " / " << circ.num_clbits() << std::endl;
+        return EqualityError;
+    }
+    // operator== compares the instruction sequence through the C-API.
+    if (!(loaded[0] == circ)) {
+        std::cerr << "  from_qpy_round_trip test : loaded circuit differs from the original"
+            << std::endl;
+        return EqualityError;
+    }
+    // Re-exporting the imported circuit must reproduce the payload, which only
+    // holds if the import preserved everything the exporter writes.
+    QuantumCircuit reloaded = loaded[0];
+    if (reloaded.to_qpy() != circ.to_qpy()) {
+        std::cerr << "  from_qpy_round_trip test : re-exported payload differs" << std::endl;
+        return EqualityError;
+    }
+    return Ok;
+}
+
+static int test_from_qpy_registers(void) {
+    auto qr0 = QuantumRegister(2, std::string("alpha"));
+    auto qr1 = QuantumRegister(3, std::string("beta"));
+    auto cr0 = ClassicalRegister(2, std::string("gamma"));
+    auto cr1 = ClassicalRegister(3, std::string("delta"));
+    QuantumCircuit circ(std::vector<QuantumRegister>({qr0, qr1}),
+                        std::vector<ClassicalRegister>({cr0, cr1}));
+    circ.h(0);
+    circ.cx(0, 4);
+
+    const auto loaded = QuantumCircuit::from_qpy(circ.to_qpy());
+    if (loaded.size() != 1) {
+        std::cerr << "  from_qpy_registers test : loaded " << loaded.size()
+            << " circuits, expected 1" << std::endl;
+        return EqualityError;
+    }
+    const QuantumCircuit &imported = loaded[0];
+
+    if (imported.num_qregs() != 2 || imported.num_cregs() != 2) {
+        std::cerr << "  from_qpy_registers test : loaded " << imported.num_qregs()
+            << " qregs / " << imported.num_cregs() << " cregs, expected 2 / 2" << std::endl;
+        return EqualityError;
+    }
+
+    const char *expected_qregs[] = {"alpha", "beta"};
+    const uint_t expected_qsizes[] = {2, 3};
+    const uint_t expected_qbases[] = {0, 2};
+    for (uint_t i = 0; i < 2; i++) {
+        const auto &reg = imported.qregs()[i];
+        if (reg.name() != expected_qregs[i] || reg.size() != expected_qsizes[i]
+            || reg.base_index() != expected_qbases[i]) {
+            std::cerr << "  from_qpy_registers test : qreg " << i << " is \"" << reg.name()
+                << "\" size " << reg.size() << " base " << reg.base_index()
+                << ", expected \"" << expected_qregs[i] << "\" size " << expected_qsizes[i]
+                << " base " << expected_qbases[i] << std::endl;
+            return EqualityError;
+        }
+    }
+
+    const char *expected_cregs[] = {"gamma", "delta"};
+    const uint_t expected_csizes[] = {2, 3};
+    const uint_t expected_cbases[] = {0, 2};
+    for (uint_t i = 0; i < 2; i++) {
+        const auto &reg = imported.cregs()[i];
+        if (reg.name() != expected_cregs[i] || reg.size() != expected_csizes[i]
+            || reg.base_index() != expected_cbases[i]) {
+            std::cerr << "  from_qpy_registers test : creg " << i << " is \"" << reg.name()
+                << "\" size " << reg.size() << " base " << reg.base_index()
+                << ", expected \"" << expected_cregs[i] << "\" size " << expected_csizes[i]
+                << " base " << expected_cbases[i] << std::endl;
+            return EqualityError;
+        }
+    }
+    return Ok;
+}
+
+static int test_from_qpy_register_bits_addressable(void) {
+    // A register recovered from QPY must address the same circuit bits as the
+    // original. Bit::global_index() resolves through the register a bit points
+    // at, so this covers both the recovered base index and the bit wiring.
+    auto qr0 = QuantumRegister(2, std::string("a"));
+    auto qr1 = QuantumRegister(2, std::string("b"));
+    auto cr0 = ClassicalRegister(2, std::string("c"));
+    auto cr1 = ClassicalRegister(2, std::string("d"));
+    QuantumCircuit circ(std::vector<QuantumRegister>({qr0, qr1}),
+                        std::vector<ClassicalRegister>({cr0, cr1}));
+    circ.h(0);
+
+    auto loaded = QuantumCircuit::from_qpy(circ.to_qpy());
+    if (loaded.size() != 1) {
+        std::cerr << "  from_qpy_register_bits_addressable test : loaded " << loaded.size()
+            << " circuits, expected 1" << std::endl;
+        return EqualityError;
+    }
+
+    std::vector<QuantumRegister> qregs = loaded[0].qregs();
+    std::vector<ClassicalRegister> cregs = loaded[0].cregs();
+    if (qregs.size() != 2 || cregs.size() != 2) {
+        std::cerr << "  from_qpy_register_bits_addressable test : expected 2 qregs and 2 cregs"
+            << std::endl;
+        return EqualityError;
+    }
+    // The second register of each kind starts at circuit bit 2.
+    for (uint_t i = 0; i < qregs[1].size(); i++) {
+        const uint32_t qubit = static_cast<uint32_t>(qregs[1][i]);
+        const uint32_t clbit = static_cast<uint32_t>(cregs[1][i]);
+        if (qubit != 2 + i || clbit != 2 + i) {
+            std::cerr << "  from_qpy_register_bits_addressable test : bit " << i
+                << " of the second registers maps to qubit " << qubit << " / clbit " << clbit
+                << ", expected " << (2 + i) << " for both" << std::endl;
+            return EqualityError;
+        }
+    }
+
+    // Using the recovered registers to build on the imported circuit must
+    // target those same bits.
+    QuantumCircuit imported = loaded[0];
+    imported.measure(qregs[1], cregs[1]);
+    const auto &measured = imported.get_measure_map();
+    if (measured.size() != 2) {
+        std::cerr << "  from_qpy_register_bits_addressable test : recorded " << measured.size()
+            << " measurements, expected 2" << std::endl;
+        return EqualityError;
+    }
+    for (uint_t i = 0; i < 2; i++) {
+        if (measured[i].first != 2 + i || measured[i].second != 2 + i) {
+            std::cerr << "  from_qpy_register_bits_addressable test : measurement " << i
+                << " is (" << measured[i].first << ", " << measured[i].second
+                << "), expected (" << (2 + i) << ", " << (2 + i) << ")" << std::endl;
+            return EqualityError;
+        }
+    }
+    return Ok;
+}
+
+static int test_from_qpy_global_phase(void) {
+    auto circ = QuantumCircuit(1, 0, 0.5);
+    circ.h(0);
+
+    const auto loaded = QuantumCircuit::from_qpy(circ.to_qpy());
+    if (loaded.size() != 1) {
+        std::cerr << "  from_qpy_global_phase test : loaded " << loaded.size()
+            << " circuits, expected 1" << std::endl;
+        return EqualityError;
+    }
+    // operator== compares the cached global phase as well as the instructions.
+    if (!(loaded[0] == circ)) {
+        std::cerr << "  from_qpy_global_phase test : loaded circuit differs from the original"
+            << std::endl;
+        return EqualityError;
+    }
+    return Ok;
+}
+
+static int test_from_qpy_measure_map(void) {
+    auto circ = make_bell_circuit();
+    const auto loaded = QuantumCircuit::from_qpy(circ.to_qpy());
+    if (loaded.size() != 1) {
+        std::cerr << "  from_qpy_measure_map test : loaded " << loaded.size()
+            << " circuits, expected 1" << std::endl;
+        return EqualityError;
+    }
+    if (!loaded[0].has_measurements()) {
+        std::cerr << "  from_qpy_measure_map test : measurements were not recovered" << std::endl;
+        return EqualityError;
+    }
+    if (loaded[0].get_measure_map() != circ.get_measure_map()) {
+        std::cerr << "  from_qpy_measure_map test : measure map differs from the original"
+            << std::endl;
+        return EqualityError;
+    }
+    return Ok;
+}
+
+static int test_from_qpy_parameterized(void) {
+    auto circ = QuantumCircuit(1, 0);
+    auto theta = Parameter("theta");
+    circ.rx(theta, 0);
+
+    const auto loaded = QuantumCircuit::from_qpy(circ.to_qpy());
+    if (loaded.size() != 1) {
+        std::cerr << "  from_qpy_parameterized test : loaded " << loaded.size()
+            << " circuits, expected 1" << std::endl;
+        return EqualityError;
+    }
+    if (loaded[0].num_parameters() != circ.num_parameters()) {
+        std::cerr << "  from_qpy_parameterized test : loaded " << loaded[0].num_parameters()
+            << " parameters, expected " << circ.num_parameters() << std::endl;
+        return EqualityError;
+    }
+    // Unlike the OpenQASM 3 exporter, QPY preserves the symbol itself.
+    const auto symbols = loaded[0].parameter_symbols();
+    if (symbols.size() != 1 || symbols[0] != "theta") {
+        std::cerr << "  from_qpy_parameterized test : parameter symbols were not recovered"
+            << std::endl;
+        return EqualityError;
+    }
+    return Ok;
+}
+
+static int test_from_qpy_multiple_circuits(void) {
+    std::vector<QuantumCircuit> circuits;
+    circuits.push_back(make_bell_circuit());
+    circuits.push_back(QuantumCircuit(3, 3));
+
+    const auto loaded = QuantumCircuit::from_qpy(QuantumCircuit::to_qpy(circuits));
+    if (loaded.size() != 2) {
+        std::cerr << "  from_qpy_multiple_circuits test : loaded " << loaded.size()
+            << " circuits, expected 2" << std::endl;
+        return EqualityError;
+    }
+    // The payload order must be preserved.
+    for (std::size_t i = 0; i < circuits.size(); i++) {
+        if (!(loaded[i] == circuits[i])) {
+            std::cerr << "  from_qpy_multiple_circuits test : circuit " << i
+                << " differs from the original" << std::endl;
+            return EqualityError;
+        }
+    }
+    return Ok;
+}
+
+static int test_import_qpy_round_trip(void) {
+    auto circ = make_bell_circuit();
+    const std::string filename = "test_import_qpy.qpy";
+    std::remove(filename.c_str());
+
+    circ.export_qpy(filename);
+    const auto loaded = QuantumCircuit::import_qpy(filename);
+    std::remove(filename.c_str());
+
+    if (loaded.size() != 1) {
+        std::cerr << "  import_qpy_round_trip test : loaded " << loaded.size()
+            << " circuits, expected 1" << std::endl;
+        return EqualityError;
+    }
+    if (!(loaded[0] == circ)) {
+        std::cerr << "  import_qpy_round_trip test : loaded circuit differs from the original"
+            << std::endl;
+        return EqualityError;
+    }
+    return Ok;
+}
+
+static int test_import_qpy_missing_file(void) {
+    const std::string filename = "qpy_missing_directory/absent.qpy";
+
+    try {
+        QuantumCircuit::import_qpy(filename);
+    } catch (const std::runtime_error &err) {
+        const std::string message = err.what();
+        if (message.find("QPY import failed") == std::string::npos) {
+            std::cerr << "  import_qpy_missing_file test : unexpected error: " << message
+                << std::endl;
+            return EqualityError;
+        }
+        if (message.find(filename) == std::string::npos) {
+            std::cerr << "  import_qpy_missing_file test : error does not name the path: "
+                << message << std::endl;
+            return EqualityError;
+        }
+        return Ok;
+    }
+
+    std::cerr << "  import_qpy_missing_file test : expected runtime_error" << std::endl;
+    return RuntimeError;
+}
+
+static int test_from_qpy_invalid_payload(void) {
+    const std::vector<std::uint8_t> garbage(32, 0x7f);
+
+    try {
+        QuantumCircuit::from_qpy(garbage);
+    } catch (const std::runtime_error &err) {
+        if (std::string(err.what()).find("QPY import failed") == std::string::npos) {
+            std::cerr << "  from_qpy_invalid_payload test : unexpected error: " << err.what()
+                << std::endl;
+            return EqualityError;
+        }
+        return Ok;
+    }
+
+    std::cerr << "  from_qpy_invalid_payload test : expected runtime_error" << std::endl;
+    return RuntimeError;
+}
+
+static int test_from_qpy_empty_payload(void) {
+    const std::vector<std::uint8_t> empty;
+
+    try {
+        QuantumCircuit::from_qpy(empty);
+    } catch (const std::runtime_error &err) {
+        if (std::string(err.what()).find("QPY import failed") == std::string::npos) {
+            std::cerr << "  from_qpy_empty_payload test : unexpected error: " << err.what()
+                << std::endl;
+            return EqualityError;
+        }
+        return Ok;
+    }
+
+    std::cerr << "  from_qpy_empty_payload test : expected runtime_error" << std::endl;
+    return RuntimeError;
+}
+
+static int test_from_qpy_no_circuits(void) {
+    // A payload holding zero circuits is valid QPY and must import as an empty
+    // list rather than an error.
+    std::vector<QuantumCircuit> none;
+    const auto loaded = QuantumCircuit::from_qpy(QuantumCircuit::to_qpy(none));
+    if (!loaded.empty()) {
+        std::cerr << "  from_qpy_no_circuits test : loaded " << loaded.size()
+            << " circuits, expected 0" << std::endl;
+        return EqualityError;
+    }
+    return Ok;
+}
+
+static int test_from_qpy_qasm3_agrees(void) {
+    // The imported circuit must be usable by the rest of qiskit-cpp, not just
+    // hold the right C-API handle.
+    auto circ = make_bell_circuit();
+    const auto loaded = QuantumCircuit::from_qpy(circ.to_qpy());
+    if (loaded.size() != 1) {
+        std::cerr << "  from_qpy_qasm3_agrees test : loaded " << loaded.size()
+            << " circuits, expected 1" << std::endl;
+        return EqualityError;
+    }
+
+    QuantumCircuit imported = loaded[0];
+    const auto actual = imported.to_qasm3();
+    const auto expected = circ.to_qasm3();
+    if (actual != expected) {
+        std::cerr << "  from_qpy_qasm3_agrees test : \n    expected:\n" << expected
+            << "\n    actual:\n" << actual << std::endl;
+        return EqualityError;
+    }
+    return Ok;
+}
+
+static int test_qpy_min_versions(void) {
+    // Writing is only supported for formats at least as new as the oldest
+    // readable one, so the write floor cannot be below the read floor.
+    if (QuantumCircuit::qpy_write_min_version() < QuantumCircuit::qpy_read_min_version()) {
+        std::cerr << "  qpy_min_versions test : write minimum "
+            << static_cast<unsigned>(QuantumCircuit::qpy_write_min_version())
+            << " is below read minimum "
+            << static_cast<unsigned>(QuantumCircuit::qpy_read_min_version()) << std::endl;
+        return EqualityError;
+    }
+    return Ok;
+}
+#endif // QISKIT_CPP_HAS_QPY
+
 #if defined(_WIN32)
 int test_circuit(int argc, char** const argv) {
 #else
@@ -1233,6 +1779,30 @@ int test_circuit(int argc, char** argv) {
     num_failed += RUN_TEST(test_to_qasm3_cu3_definition);
     num_failed += RUN_TEST(test_to_qasm3_global_phase);
     num_failed += RUN_TEST(test_to_qasm3_physical_qubits);
+#if QISKIT_CPP_HAS_QPY
+    num_failed += RUN_TEST(test_to_qpy);
+    num_failed += RUN_TEST(test_to_qpy_with_version);
+    num_failed += RUN_TEST(test_to_qpy_parameterized);
+    num_failed += RUN_TEST(test_to_qpy_multiple_circuits);
+    num_failed += RUN_TEST(test_to_qpy_empty_list);
+    num_failed += RUN_TEST(test_export_qpy);
+    num_failed += RUN_TEST(test_export_qpy_multiple_circuits);
+    num_failed += RUN_TEST(test_export_qpy_bad_path);
+    num_failed += RUN_TEST(test_qpy_min_versions);
+    num_failed += RUN_TEST(test_from_qpy_round_trip);
+    num_failed += RUN_TEST(test_from_qpy_registers);
+    num_failed += RUN_TEST(test_from_qpy_register_bits_addressable);
+    num_failed += RUN_TEST(test_from_qpy_global_phase);
+    num_failed += RUN_TEST(test_from_qpy_measure_map);
+    num_failed += RUN_TEST(test_from_qpy_parameterized);
+    num_failed += RUN_TEST(test_from_qpy_multiple_circuits);
+    num_failed += RUN_TEST(test_import_qpy_round_trip);
+    num_failed += RUN_TEST(test_import_qpy_missing_file);
+    num_failed += RUN_TEST(test_from_qpy_invalid_payload);
+    num_failed += RUN_TEST(test_from_qpy_empty_payload);
+    num_failed += RUN_TEST(test_from_qpy_no_circuits);
+    num_failed += RUN_TEST(test_from_qpy_qasm3_agrees);
+#endif
 
     std::cerr << "=== Number of failed subtests: " << num_failed << std::endl;
     return num_failed;

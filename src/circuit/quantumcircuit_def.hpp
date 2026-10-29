@@ -27,6 +27,7 @@
 #include <cassert>
 
 #include "utils/types.hpp"
+#include "utils/capi_features.hpp"
 #include "circuit/parameter.hpp"
 //#include "circuit/classical/expr.hpp"
 #include "circuit/classicalregister.hpp"
@@ -59,6 +60,7 @@ namespace circuit
 class ControlFlowOp;
 class IfElseOp;
 class Qasm3Exporter;
+class QpyImporter;
 
 static Parameter null_param;
 
@@ -67,6 +69,7 @@ static Parameter null_param;
 class QuantumCircuit
 {
 	friend class Qasm3Exporter;
+	friend class QpyImporter;
 protected:
 	uint_t num_qubits_;			// number of qubits
 	uint_t num_clbits_;			// number of classical bits
@@ -1593,6 +1596,86 @@ public:
 	/// @brief Serialize a QuantumCircuit object as an OpenQASM3 string.
 	/// @return An OpenQASM3 string.
 	std::string to_qasm3(void);
+
+	// qpy
+
+#if QISKIT_CPP_HAS_QPY
+	/// @brief Serialize this circuit to a QPY file.
+	/// @param filename The path of the file to write.
+	/// @param version The QPY format version to emit, or 0 (the default) to use
+	///   the version the loaded Qiskit writes by default. A non-zero value must
+	///   be at least ``qpy_write_min_version()``.
+	/// @throws std::runtime_error if the circuit cannot be serialized or the
+	///   file cannot be written.
+	/// @note Unlike ``to_qasm3()``, QPY is a binary format that round-trips
+	///   losslessly through Python Qiskit's ``qiskit.qpy.load()``.
+	/// @note Requires Qiskit 2.6.0 or later.
+	void export_qpy(const std::string &filename, const std::uint8_t version = 0);
+
+	/// @brief Serialize this circuit as a QPY payload.
+	/// @param version The QPY format version to emit, or 0 (the default) to use
+	///   the version the loaded Qiskit writes by default. A non-zero value must
+	///   be at least ``qpy_write_min_version()``.
+	/// @return The QPY payload bytes.
+	/// @throws std::runtime_error if the circuit cannot be serialized.
+	/// @note Requires Qiskit 2.6.0 or later.
+	std::vector<std::uint8_t> to_qpy(const std::uint8_t version = 0);
+
+	/// @brief Serialize several circuits to a single QPY file.
+	/// @param circuits The circuits to serialize, written in the order given.
+	/// @param filename The path of the file to write.
+	/// @param version The QPY format version to emit, or 0 (the default) to use
+	///   the version the loaded Qiskit writes by default. A non-zero value must
+	///   be at least ``qpy_write_min_version()``.
+	/// @throws std::runtime_error if the circuits cannot be serialized or the
+	///   file cannot be written.
+	/// @note Requires Qiskit 2.6.0 or later.
+	static void export_qpy(std::vector<QuantumCircuit> &circuits,
+		const std::string &filename, const std::uint8_t version = 0);
+
+	/// @brief Serialize several circuits as a single QPY payload.
+	/// @param circuits The circuits to serialize, written in the order given.
+	/// @param version The QPY format version to emit, or 0 (the default) to use
+	///   the version the loaded Qiskit writes by default. A non-zero value must
+	///   be at least ``qpy_write_min_version()``.
+	/// @return The QPY payload bytes.
+	/// @throws std::runtime_error if the circuits cannot be serialized.
+	/// @note Requires Qiskit 2.6.0 or later.
+	static std::vector<std::uint8_t> to_qpy(std::vector<QuantumCircuit> &circuits,
+		const std::uint8_t version = 0);
+
+	/// @brief Return the oldest QPY format version this Qiskit can write.
+	/// @return The minimum version accepted by the ``version`` arguments above.
+	/// @note Requires Qiskit 2.6.0 or later.
+	static std::uint8_t qpy_write_min_version(void);
+
+	/// @brief Return the oldest QPY format version this Qiskit can read.
+	/// @return The minimum version that can be deserialized.
+	/// @note Requires Qiskit 2.6.0 or later.
+	static std::uint8_t qpy_read_min_version(void);
+
+	/// @brief Read circuits from a QPY file.
+	/// @param filename The path of the file to read.
+	/// @return The circuits stored in the file, in the order they appear in it.
+	///   A QPY payload always holds a list, so this returns a vector even when
+	///   the file holds a single circuit.
+	/// @throws std::runtime_error if the file cannot be read, does not hold
+	///   supported QPY, or holds a register that qiskit-cpp cannot represent.
+	/// @note The transpiler layout and circuit metadata are not recovered,
+	///   because QPY written through the C-API does not carry them. The
+	///   instructions, registers, global phase, and qubit indices are.
+	/// @note Requires Qiskit 2.6.0 or later.
+	static std::vector<QuantumCircuit> import_qpy(const std::string &filename);
+
+	/// @brief Read circuits from a QPY payload.
+	/// @param payload The QPY bytes to read.
+	/// @return The circuits stored in the payload, in the order they appear in
+	///   it.
+	/// @throws std::runtime_error if the payload is not supported QPY or holds
+	///   a register that qiskit-cpp cannot represent.
+	/// @note Requires Qiskit 2.6.0 or later.
+	static std::vector<QuantumCircuit> from_qpy(const std::vector<std::uint8_t> &payload);
+#endif // QISKIT_CPP_HAS_QPY
 
 	/// @brief print circuit (this is for debug)
 	void print(void) const

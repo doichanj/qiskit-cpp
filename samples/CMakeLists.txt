@@ -103,6 +103,9 @@ add_application(circuit_test circuit_test.cpp)
 add_application(observable_test observable_test.cpp)
 add_application(target_test target_test.cpp)
 add_application(parameterized_circuit_test parameterized_circuit_test.cpp)
+# Reports an error at run time when built against a Qiskit older than 2.6.0,
+# which does not provide the QPY C-API.
+add_application(qpy_test qpy_test.cpp)
 
 if(QRMI_ROOT OR QISKIT_IBM_RUNTIME_C_ROOT OR SQC_ROOT)
   add_application(sampler_test sampler_test.cpp)
