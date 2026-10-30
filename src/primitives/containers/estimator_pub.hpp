@@ -27,6 +27,7 @@
 #include <nlohmann/json.hpp>
 
 #include "circuit/quantumcircuit.hpp"
+#include "primitives/containers/circuit_serialization.hpp"
 #include "quantum_info/sparse_observable.hpp"
 
 namespace Qiskit {
@@ -41,6 +42,7 @@ protected:
     nlohmann::ordered_json parameter_values_;
     double precision_ = 0.0;
     bool has_precision_ = false;
+    CircuitSerialization serialization_ = default_circuit_serialization();
 
 public:
     /// @brief Create a new EstimatorPub.
@@ -157,6 +159,7 @@ public:
         parameter_values_ = src.parameter_values_;
         precision_ = src.precision_;
         has_precision_ = src.has_precision_;
+        serialization_ = src.serialization_;
     }
 
     ~EstimatorPub() {}
@@ -214,6 +217,23 @@ public:
         has_precision_ = true;
     }
 
+    /// @brief Return the serialization used for this pub's circuit.
+    /// @return the serialization
+    CircuitSerialization serialization(void) const
+    {
+        return serialization_;
+    }
+
+    /// @brief Set the serialization used for this pub's circuit.
+    /// @param serialization the serialization to use
+    /// @note QPY is the default where available and round-trips the circuit
+    ///   losslessly. OpenQASM 3 remains accepted by Qiskit Runtime and can be
+    ///   selected here as a fallback.
+    void set_serialization(const CircuitSerialization serialization)
+    {
+        serialization_ = serialization;
+    }
+
     /// @brief Return the number of observables in this pub.
     /// @return number of observables.
     uint_t num_observables(void) const
@@ -244,7 +264,7 @@ public:
         require_valid();
 
         nlohmann::ordered_json ret = nlohmann::ordered_json::array();
-        ret.push_back(circuit_.to_qasm3());
+        ret.push_back(serialize_pub_circuit(circuit_, serialization_));
         ret.push_back(observables_);
         ret.push_back(parameter_values_);
         if (has_precision_) {

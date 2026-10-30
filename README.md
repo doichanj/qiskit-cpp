@@ -89,6 +89,8 @@ Examples are available in [this directory](./samples).
 To build application using Qiskit C++, add path to Qiskit C-API, include path to `qiskit.h` (installed in `dist/c/include`) and library `libqiskit.so` (installed in `dist/c/lib`) or `qiskit_cext.dll.lib` (generated in `target/release`) for Windows.
 See ./samples/CMakeLists.txt for example to make test program.
 
+You also need to link **zlib**. Primitive PUB circuits are submitted to Qiskit Runtime as zlib-compressed QPY, so serializing a circuit requires it. The sample and test CMake configurations locate it with `find_package(ZLIB REQUIRED)`.
+
 ```shell-session
 $ cd samples
 $ mkdir build
@@ -117,6 +119,19 @@ QISKIT_IBM_INSTANCE=<your CRN>
 ```
 
 The estimator interface is available through `primitives::BackendEstimatorV2` and currently requires QRMI or another backend that implements `BackendV2::run(std::vector<EstimatorPub>&, double)`. Estimator PUB circuits must be unmeasured and can use Pauli labels, Pauli-label maps, Pauli term vectors, or `quantum_info::SparseObservable` inputs. Empty observables are rejected before backend submission, and malformed estimator result cardinality is rejected while reading provider results. Estimator job cancellation is not currently supported, so `BackendEstimatorJob::cancel()` returns `false`. (`providers::QRMIJob::cancel()` does request cancellation from QRMI, but the primitive job wrappers do not yet call it.)
+
+#### Circuit serialization in primitive PUBs
+
+Qiskit Runtime accepts a PUB circuit either as an OpenQASM 3 string or as a QPY payload. qiskit-cpp sends **QPY** by default when built against a Qiskit providing the QPY C-API (2.6.0 or later), because QPY round-trips the circuit losslessly, including symbolic parameters, while the OpenQASM 3 exporter has to recover parameter names from expression strings. The circuit is emitted as `{"__type__": "QuantumCircuit", "__value__": <base64 of zlib-compressed QPY>}`.
+
+To send OpenQASM 3 instead for a given pub:
+
+```cpp
+auto pub = SamplerPub(circ, shots);
+pub.set_serialization(CircuitSerialization::qasm3);
+```
+
+The QPY format version is pinned to 17, the only version both Qiskit's C-API (which will not write below 17) and Qiskit Runtime (which rejects above 17) accept.
 
 #### QRMI resource types
 

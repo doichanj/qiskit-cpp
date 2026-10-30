@@ -16,6 +16,10 @@ set(QISKIT_CPP_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/)
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
+# Qiskit Runtime takes primitive PUB circuits as zlib-compressed QPY, so
+# serializing a circuit needs zlib.
+find_package(ZLIB REQUIRED)
+
 include(FetchContent)
 
 FetchContent_Declare(json URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz)
@@ -77,6 +81,16 @@ function(add_application APP_NAME CPP_FILE)
           "-L${QISKIT_ROOT}/dist/c/lib -Wl,-rpath ${QISKIT_ROOT}/dist/c/lib" qiskit nlohmann_json::nlohmann_json
       )
     endif()
+  endif()
+
+  # zlib is needed by every configuration, so it is linked once here rather
+  # than repeated in each branch above. The signature has to match the branch
+  # taken: CMake rejects mixing the plain and keyword forms on one target, and
+  # the MSVC branches above use the plain form.
+  if (MSVC)
+    target_link_libraries(${APP_NAME} ZLIB::ZLIB)
+  else()
+    target_link_libraries(${APP_NAME} PRIVATE ZLIB::ZLIB)
   endif()
 
   # path to headerfile

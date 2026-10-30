@@ -21,6 +21,7 @@
 using json = nlohmann::json;
 
 #include "circuit/quantumcircuit.hpp"
+#include "primitives/containers/circuit_serialization.hpp"
 
 
 namespace Qiskit {
@@ -36,6 +37,7 @@ protected:
     //std::vector<std::string> params_;     //Parameter will be supported Qiskit 2.2 or higher
     //std::vector<double> values_;
     uint_t shots_ = 0;
+    CircuitSerialization serialization_ = default_circuit_serialization();
 public:
     /// @brief Create a new SamplerPub
     SamplerPub() {}
@@ -69,6 +71,7 @@ public:
     {
         circuit_ = src.circuit_;
         shots_ = src.shots_;
+        serialization_ = src.serialization_;
     }
     ~SamplerPub(){}
 
@@ -99,17 +102,41 @@ public:
         return shots_;
     }
 
+    /// @brief Return the serialization used for this pub's circuit
+    /// @return the serialization
+    CircuitSerialization serialization(void) const
+    {
+        return serialization_;
+    }
+
+    /// @brief Set the serialization used for this pub's circuit
+    /// @param serialization the serialization to use
+    /// @note QPY is the default where available and round-trips the circuit
+    ///   losslessly. OpenQASM 3 remains accepted by Qiskit Runtime and can be
+    ///   selected here as a fallback.
+    void set_serialization(const CircuitSerialization serialization)
+    {
+        serialization_ = serialization;
+    }
+
     /// @brief Return a JSON format of this sampler pub
     /// @return a JSON format sampler pub
     nlohmann::ordered_json to_json(void)
     {
         // TO DO: insert parameters here when Parameter will be supported
-        nlohmann::ordered_json params = json::array();
+        nlohmann::ordered_json params = nlohmann::ordered_json::array();
 
+        // Built up element by element rather than from an initializer list so
+        // that the circuit stays an ordered_json throughout. Going through the
+        // unordered nlohmann::json would re-sort the keys of the QPY payload
+        // object.
+        nlohmann::ordered_json ret = nlohmann::ordered_json::array();
+        ret.push_back(serialize_pub_circuit(circuit_, serialization_));
+        ret.push_back(params);
         if (shots_ > 0) {
-            return json::array({circuit_.to_qasm3(), params, shots_});
+            ret.push_back(shots_);
         }
-        return json::array({circuit_.to_qasm3(), params});
+        return ret;
     }
 
 };
