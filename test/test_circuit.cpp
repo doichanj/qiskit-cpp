@@ -617,6 +617,300 @@ static int test_compose(void) {
     return Ok;
 }
 
+static int test_delay(void) {
+    auto circ = QuantumCircuit(2, 0);
+
+    if (!circ.delay(100, (uint_t)0)) {
+        std::cerr << "  delay test : delay in dt was rejected" << std::endl;
+        return RuntimeError;
+    }
+    if (!circ.delay(250.5, (uint_t)1, DelayUnit::ns)) {
+        std::cerr << "  delay test : delay in ns was rejected" << std::endl;
+        return RuntimeError;
+    }
+    if (circ.num_instructions() != 2) {
+        std::cerr << "  delay test : " << circ.num_instructions()
+            << " instructions, expected 2" << std::endl;
+        return EqualityError;
+    }
+
+    // Read the instructions back and confirm the duration, unit and qubit all
+    // round-trip through the C-API.
+    CircuitInstruction op = circ[0];
+    if (op.instruction().name() != "delay" || op.qubits()[0] != 0
+        || op.instruction().delay_duration() != 100.0
+        || op.instruction().delay_unit() != QkDelayUnit_DT) {
+        std::cerr << "  delay test : instruction 0 is \"" << op.instruction().name()
+            << "\" of " << op.instruction().delay_duration() << " on qubit "
+            << op.qubits()[0] << ", expected a 100 dt delay on qubit 0" << std::endl;
+        return EqualityError;
+    }
+
+    op = circ[1];
+    if (op.instruction().name() != "delay" || op.qubits()[0] != 1
+        || op.instruction().delay_duration() != 250.5
+        || op.instruction().delay_unit() != QkDelayUnit_NS) {
+        std::cerr << "  delay test : instruction 1 is \"" << op.instruction().name()
+            << "\" of " << op.instruction().delay_duration() << " on qubit "
+            << op.qubits()[0] << ", expected a 250.5 ns delay on qubit 1" << std::endl;
+        return EqualityError;
+    }
+
+    return Ok;
+}
+
+static int test_delay_all_qubits(void) {
+    // Omitting the qubit delays every qubit, as in Qiskit.
+    auto circ = QuantumCircuit(3, 0);
+    if (!circ.delay(64)) {
+        std::cerr << "  delay_all_qubits test : delay was rejected" << std::endl;
+        return RuntimeError;
+    }
+    if (circ.num_instructions() != 3) {
+        std::cerr << "  delay_all_qubits test : " << circ.num_instructions()
+            << " instructions, expected 3" << std::endl;
+        return EqualityError;
+    }
+    for (uint_t i = 0; i < 3; i++) {
+        CircuitInstruction op = circ[i];
+        if (op.instruction().name() != "delay" || op.qubits()[0] != i
+            || op.instruction().delay_duration() != 64.0) {
+            std::cerr << "  delay_all_qubits test : instruction " << i << " is \""
+                << op.instruction().name() << "\" on qubit " << op.qubits()[0]
+                << ", expected a 64 dt delay on qubit " << i << std::endl;
+            return EqualityError;
+        }
+    }
+    return Ok;
+}
+
+static int test_delay_register(void) {
+    auto qreg1 = QuantumRegister(1, std::string("a"));
+    auto qreg2 = QuantumRegister(2, std::string("b"));
+    QuantumCircuit circ(std::vector<QuantumRegister>({qreg1, qreg2}),
+                        std::vector<ClassicalRegister>());
+
+    // The second register occupies circuit qubits 1 and 2.
+    if (!circ.delay(32, qreg2)) {
+        std::cerr << "  delay_register test : delay was rejected" << std::endl;
+        return RuntimeError;
+    }
+    if (circ.num_instructions() != 2) {
+        std::cerr << "  delay_register test : " << circ.num_instructions()
+            << " instructions, expected 2" << std::endl;
+        return EqualityError;
+    }
+    for (uint_t i = 0; i < 2; i++) {
+        CircuitInstruction op = circ[i];
+        if (op.qubits()[0] != 1 + i) {
+            std::cerr << "  delay_register test : instruction " << i << " is on qubit "
+                << op.qubits()[0] << ", expected " << (1 + i) << std::endl;
+            return EqualityError;
+        }
+    }
+    return Ok;
+}
+
+static int test_delay_unit_names(void) {
+    auto circ = QuantumCircuit(1, 0);
+    const char *names[] = {"dt", "s", "ms", "us", "ns", "ps"};
+    const QkDelayUnit expected[] = {QkDelayUnit_DT, QkDelayUnit_S, QkDelayUnit_MS,
+                                    QkDelayUnit_US, QkDelayUnit_NS, QkDelayUnit_PS};
+
+    for (uint_t i = 0; i < 6; i++) {
+        if (!circ.delay(8, (uint_t)0, std::string(names[i]))) {
+            std::cerr << "  delay_unit_names test : unit \"" << names[i]
+                << "\" was rejected" << std::endl;
+            return RuntimeError;
+        }
+        CircuitInstruction op = circ[i];
+        if (op.instruction().delay_unit() != expected[i]) {
+            std::cerr << "  delay_unit_names test : unit \"" << names[i]
+                << "\" round-tripped as " << op.instruction().delay_unit() << std::endl;
+            return EqualityError;
+        }
+    }
+
+    // An unrecognized unit name is rejected without adding an instruction.
+    if (circ.delay(8, (uint_t)0, std::string("fortnights"))) {
+        std::cerr << "  delay_unit_names test : an unknown unit was accepted" << std::endl;
+        return EqualityError;
+    }
+    if (circ.num_instructions() != 6) {
+        std::cerr << "  delay_unit_names test : " << circ.num_instructions()
+            << " instructions, expected 6" << std::endl;
+        return EqualityError;
+    }
+    return Ok;
+}
+
+static int test_delay_invalid_duration(void) {
+    auto circ = QuantumCircuit(1, 0);
+
+    // A negative duration is rejected.
+    if (circ.delay(-1.0, (uint_t)0)) {
+        std::cerr << "  delay_invalid_duration test : a negative duration was accepted"
+            << std::endl;
+        return EqualityError;
+    }
+    // A fractional dt duration cannot be represented, since dt counts whole
+    // backend cycles, so it is rejected rather than truncated.
+    if (circ.delay(1.5, (uint_t)0)) {
+        std::cerr << "  delay_invalid_duration test : a fractional dt duration was accepted"
+            << std::endl;
+        return EqualityError;
+    }
+    // The same value is fine in a time unit.
+    if (!circ.delay(1.5, (uint_t)0, DelayUnit::us)) {
+        std::cerr << "  delay_invalid_duration test : a fractional us duration was rejected"
+            << std::endl;
+        return RuntimeError;
+    }
+    if (circ.num_instructions() != 1) {
+        std::cerr << "  delay_invalid_duration test : " << circ.num_instructions()
+            << " instructions, expected 1" << std::endl;
+        return EqualityError;
+    }
+    return Ok;
+}
+
+static int test_delay_append(void) {
+    auto circ = QuantumCircuit(2, 0);
+
+    // Appending a Delay instruction must behave as calling delay() directly,
+    // including through CircuitInstruction, which stores the instruction by
+    // value and so relies on the duration surviving a copy to the base class.
+    circ.append(Delay(16, DelayUnit::us), (uint_t)0);
+    circ.append(CircuitInstruction(Delay(48, DelayUnit::ms), reg_t({1})));
+
+    if (circ.num_instructions() != 2) {
+        std::cerr << "  delay_append test : " << circ.num_instructions()
+            << " instructions, expected 2" << std::endl;
+        return EqualityError;
+    }
+
+    CircuitInstruction op = circ[0];
+    if (op.instruction().delay_duration() != 16.0
+        || op.instruction().delay_unit() != QkDelayUnit_US || op.qubits()[0] != 0) {
+        std::cerr << "  delay_append test : appended instruction 0 is "
+            << op.instruction().delay_duration() << " unit "
+            << op.instruction().delay_unit() << " on qubit " << op.qubits()[0]
+            << ", expected 16 us on qubit 0" << std::endl;
+        return EqualityError;
+    }
+
+    op = circ[1];
+    if (op.instruction().delay_duration() != 48.0
+        || op.instruction().delay_unit() != QkDelayUnit_MS || op.qubits()[0] != 1) {
+        std::cerr << "  delay_append test : appended instruction 1 is "
+            << op.instruction().delay_duration() << " unit "
+            << op.instruction().delay_unit() << " on qubit " << op.qubits()[0]
+            << ", expected 48 ms on qubit 1" << std::endl;
+        return EqualityError;
+    }
+    return Ok;
+}
+
+static int test_delay_compose(void) {
+    auto sub = QuantumCircuit(1, 0);
+    sub.delay(120, (uint_t)0, DelayUnit::ns);
+
+    auto circ = QuantumCircuit(2, 0);
+    circ.h(0);
+    circ.compose(sub, reg_t({1}), reg_t());
+
+    if (circ.num_instructions() != 2) {
+        std::cerr << "  delay_compose test : " << circ.num_instructions()
+            << " instructions, expected 2" << std::endl;
+        return EqualityError;
+    }
+    CircuitInstruction op = circ[1];
+    if (op.instruction().name() != "delay" || op.qubits()[0] != 1
+        || op.instruction().delay_duration() != 120.0
+        || op.instruction().delay_unit() != QkDelayUnit_NS) {
+        std::cerr << "  delay_compose test : composed instruction is \""
+            << op.instruction().name() << "\" of " << op.instruction().delay_duration()
+            << " unit " << op.instruction().delay_unit() << " on qubit " << op.qubits()[0]
+            << ", expected a 120 ns delay on qubit 1" << std::endl;
+        return EqualityError;
+    }
+    return Ok;
+}
+
+static int test_to_qasm3_delay(void) {
+    auto circ = QuantumCircuit(2, 0);
+    circ.delay(100, (uint_t)0);
+    circ.delay(250.5, (uint_t)1, DelayUnit::ns);
+    circ.h(0);
+
+    const auto actual = circ.to_qasm3();
+    const std::string expected =
+        "OPENQASM 3.0;\n"
+        "include \"stdgates.inc\";\n"
+        "qubit[2] q;\n"
+        "delay[100dt] q[0];\n"
+        "delay[250.5ns] q[1];\n"
+        "h q[0];\n";
+    if (actual != expected) {
+        std::cerr << "  to_qasm3_delay test : \n    expected:\n" << expected
+            << "\n    actual:\n" << actual << std::endl;
+        return EqualityError;
+    }
+    return Ok;
+}
+
+static int test_to_qasm3_delay_picoseconds(void) {
+    // OpenQASM 3 has no picosecond literal, so a ps duration is emitted in
+    // nanoseconds, as Qiskit's own exporter does.
+    auto circ = QuantumCircuit(1, 0);
+    circ.delay(2000, (uint_t)0, DelayUnit::ps);
+
+    const auto actual = circ.to_qasm3();
+    const std::string expected =
+        "OPENQASM 3.0;\n"
+        "include \"stdgates.inc\";\n"
+        "qubit[1] q;\n"
+        "delay[2ns] q[0];\n";
+    if (actual != expected) {
+        std::cerr << "  to_qasm3_delay_picoseconds test : \n    expected:\n" << expected
+            << "\n    actual:\n" << actual << std::endl;
+        return EqualityError;
+    }
+    return Ok;
+}
+
+static int test_to_qasm3_delay_with_parameter(void) {
+    // A delay's duration is a numeric literal, so it must not be mistaken for a
+    // parameter symbol: parameter_symbols() cross-checks its harvested names
+    // against the Rust-side symbol count and throws on a mismatch.
+    auto circ = QuantumCircuit(1, 0);
+    auto theta = Parameter("theta");
+    circ.rx(theta, 0);
+    circ.delay(250.5, (uint_t)0, DelayUnit::ns);
+
+    const auto symbols = circ.parameter_symbols();
+    if (symbols.size() != 1 || symbols[0] != "theta") {
+        std::cerr << "  to_qasm3_delay_with_parameter test : harvested " << symbols.size()
+            << " symbols, expected just \"theta\"" << std::endl;
+        return EqualityError;
+    }
+
+    const auto actual = circ.to_qasm3();
+    const std::string expected =
+        "OPENQASM 3.0;\n"
+        "include \"stdgates.inc\";\n"
+        "input float[64] theta;\n"
+        "qubit[1] q;\n"
+        "rx(theta) q[0];\n"
+        "delay[250.5ns] q[0];\n";
+    if (actual != expected) {
+        std::cerr << "  to_qasm3_delay_with_parameter test : \n    expected:\n" << expected
+            << "\n    actual:\n" << actual << std::endl;
+        return EqualityError;
+    }
+    return Ok;
+}
+
 static int test_to_qasm3_multi_regs(void) {
     auto qreg1 = QuantumRegister(2, std::string("q1"));
     auto qreg2 = QuantumRegister(1, std::string("q2"));
@@ -1763,6 +2057,16 @@ int test_circuit(int argc, char** argv) {
     num_failed += RUN_TEST(test_measure);
     num_failed += RUN_TEST(test_append);
     num_failed += RUN_TEST(test_compose);
+    num_failed += RUN_TEST(test_delay);
+    num_failed += RUN_TEST(test_delay_all_qubits);
+    num_failed += RUN_TEST(test_delay_register);
+    num_failed += RUN_TEST(test_delay_unit_names);
+    num_failed += RUN_TEST(test_delay_invalid_duration);
+    num_failed += RUN_TEST(test_delay_append);
+    num_failed += RUN_TEST(test_delay_compose);
+    num_failed += RUN_TEST(test_to_qasm3_delay);
+    num_failed += RUN_TEST(test_to_qasm3_delay_picoseconds);
+    num_failed += RUN_TEST(test_to_qasm3_delay_with_parameter);
     num_failed += RUN_TEST(test_to_qasm3_multi_regs);
     num_failed += RUN_TEST(test_parameter_symbols);
     num_failed += RUN_TEST(test_parameter_symbols_unsupported_name);
