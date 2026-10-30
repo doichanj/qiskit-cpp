@@ -75,7 +75,7 @@ class QuantumCircuit
 protected:
 	uint_t num_qubits_;			// number of qubits
 	uint_t num_clbits_;			// number of classical bits
-	double global_phase_ = 0.0; // initial global phase
+	Parameter global_phase_;    // global phase for this circuit
 
 	std::vector<QuantumRegister> qregs_;   // quantum registers
 	std::vector<ClassicalRegister> cregs_; // classical registers
@@ -118,7 +118,7 @@ public:
 	{
 		num_qubits_ = num_qubits;
 		num_clbits_ = num_clbits;
-		global_phase_ = global_phase;
+		global_phase_ = Parameter(global_phase);
 
 		qregs_.resize(1);
 		cregs_.resize(1);
@@ -133,7 +133,7 @@ public:
 		qk_circuit_add_classical_register(rust_circuit_.get(), cregs_[0].get_register().get());
 
 		if (global_phase != 0.0) {
-			qk_circuit_gate(rust_circuit_.get(), QkGate_GlobalPhase, nullptr, &global_phase_);
+			qk_circuit_set_global_phase(rust_circuit_.get(), global_phase_.qiskit_param_.get());
 		}
 	}
 
@@ -145,7 +145,7 @@ public:
 	{
 		num_qubits_ = qreg.size();
 		num_clbits_ = creg.size();
-		global_phase_ = global_phase;
+		global_phase_ = Parameter(global_phase);
 
 		qregs_.resize(1);
 		cregs_.resize(1);
@@ -159,7 +159,7 @@ public:
 		qk_circuit_add_classical_register(rust_circuit_.get(), cregs_[0].get_register().get());
 
 		if (global_phase != 0.0) {
-			qk_circuit_gate(rust_circuit_.get(), QkGate_GlobalPhase, nullptr, &global_phase_);
+			qk_circuit_set_global_phase(rust_circuit_.get(), global_phase_.qiskit_param_.get());
 		}
 	}
 
@@ -171,7 +171,7 @@ public:
 	{
 		num_qubits_ = 0;
 		num_clbits_ = 0;
-		global_phase_ = global_phase;
+		global_phase_ = Parameter(global_phase);
 
 		qregs_.resize(qregs.size());
 		cregs_.resize(cregs.size());
@@ -200,7 +200,7 @@ public:
 		}
 
 		if (global_phase != 0.0) {
-			qk_circuit_gate(rust_circuit_.get(), QkGate_GlobalPhase, nullptr, &global_phase_);
+			qk_circuit_set_global_phase(rust_circuit_.get(), global_phase_.qiskit_param_.get());
 		}
 	}
 
@@ -365,10 +365,34 @@ public:
 
 	/// @brief set global phase
 	/// @param phase global phase value
+	/// @details Sets the circuit's global phase property, replacing any phase
+	///   already set. This is not the same as appending a GlobalPhase gate: the
+	///   property is what Qiskit's ``QuantumCircuit.global_phase`` holds, and
+	///   setting it twice does not accumulate.
 	void global_phase(const double phase)
 	{
+		global_phase(Parameter(phase));
+	}
+
+	/// @brief set global phase
+	/// @param phase global phase, which may be an unbound Parameter
+	void global_phase(const Parameter &phase)
+	{
 		global_phase_ = phase;
-		qk_circuit_gate(rust_circuit_.get(), QkGate_GlobalPhase, nullptr, &global_phase_);
+		QkExitCode ret = qk_circuit_set_global_phase(rust_circuit_.get(),
+			global_phase_.qiskit_param_.get());
+		if (ret != QkExitCode_Success) {
+			// A new symbol whose name collides with one already in the circuit
+			// is reported as QkExitCode_ParameterNameConflict.
+			std::cerr << " global_phase : could not set the global phase (" << ret << ")" << std::endl;
+		}
+	}
+
+	/// @brief Return the global phase of this circuit
+	/// @return the global phase
+	const Parameter &global_phase(void) const
+	{
+		return global_phase_;
 	}
 
 	/// @brief Apply HGate

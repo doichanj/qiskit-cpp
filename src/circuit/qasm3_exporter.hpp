@@ -301,6 +301,25 @@ protected:
     return names;
   }
 
+  /// @brief Whether a global phase needs to be emitted.
+  /// @param phase the circuit's global phase
+  /// @return false if the phase is a bound value of zero, true otherwise
+  /// @details A zero phase is the identity and is left out, matching Qiskit.
+  ///   An unbound (symbolic) phase is always emitted, because its value is not
+  ///   known here and could be non-zero once bound.
+  static bool needs_global_phase(const QkParam *phase) {
+    if (phase == nullptr) {
+      return false;
+    }
+    if (qk_param_kind(phase) == QkParamKind_ParameterExpression) {
+      return true;
+    }
+    const double value = qk_param_as_real(phase);
+    // A NaN phase is not a bound zero, so it is emitted and left for the
+    // consumer to reject rather than being silently dropped here.
+    return value != 0.0;
+  }
+
   /// @brief Format a delay instruction as an OpenQASM 3 delay statement prefix.
   /// @param circuit the circuit holding the instruction
   /// @param index the index of the delay instruction
@@ -723,6 +742,16 @@ public:
       }
       qasm3 << "bit[" << creg.size() << "] " << creg_names.back() << ";"
             << std::endl;
+    }
+
+    // Emit the circuit's global phase. It is a property of the circuit rather
+    // than an instruction, so it is not reached by the instruction loop below
+    // and has to be written out here, after the declarations it may reference
+    // and before the operations it applies to.
+    ScopedParam global_phase(qk_circuit_global_phase(circuit_.rust_circuit_.get()));
+    if (needs_global_phase(global_phase.get())) {
+      qasm3 << "gphase(" << format_parameter(global_phase.get(), input_names)
+            << ");" << std::endl;
     }
 
     auto recover_reg_data =

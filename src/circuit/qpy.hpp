@@ -92,21 +92,6 @@ protected:
     }
   };
 
-  class ScopedParam {
-    QkParam *param_;
-
-  public:
-    explicit ScopedParam(QkParam *param) : param_(param) {}
-    ~ScopedParam() {
-      if (param_ != nullptr) {
-        qk_param_free(param_);
-      }
-    }
-    ScopedParam(const ScopedParam &) = delete;
-    ScopedParam &operator=(const ScopedParam &) = delete;
-    const QkParam *get(void) const { return param_; }
-  };
-
   /// @brief Throw a ``std::runtime_error`` describing a failed QPY call.
   /// @param context what was being attempted, used as the message prefix
   /// @param code the exit code returned by the C-API
@@ -248,49 +233,21 @@ protected:
     circuit.num_qubits_ = qk_circuit_num_qubits(copied);
     circuit.num_clbits_ = qk_circuit_num_clbits(copied);
 
-    // Recover the cached global phase. qiskit-cpp applies a global phase as a
-    // ``global_phase`` gate instruction rather than through the circuit's own
-    // global-phase field (see QuantumCircuit::global_phase), so the cache is
-    // rebuilt from the instructions and the field is only consulted as a
-    // fallback for circuits written by other producers.
-    circuit.global_phase_ = 0.0;
-    circuit.measure_map_.clear();
+    // The global phase is a property of the circuit, so it is copied straight
+    // across. qk_circuit_global_phase hands back an owned QkParam, which
+    // Parameter adopts.
+    circuit.global_phase_ = Parameter(qk_circuit_global_phase(copied));
 
-    bool phase_from_instruction = false;
+    // Collect the measured qubits, as set_qiskit_circuit does for a transpiled
+    // circuit. qubit_map_ is left empty: QPY written through the C-API carries
+    // no transpiler layout.
+    circuit.measure_map_.clear();
     const std::size_t nops = qk_circuit_num_instructions(copied);
     for (std::size_t i = 0; i < nops; i++) {
-      const QkOperationKind kind = qk_circuit_instruction_kind(copied, i);
-      if (kind == QkOperationKind_Measure) {
-        // Collect the measured qubits, as set_qiskit_circuit does for a
-        // transpiled circuit. qubit_map_ is left empty: QPY written through
-        // the C-API carries no transpiler layout.
+      if (qk_circuit_instruction_kind(copied, i) == QkOperationKind_Measure) {
         QuantumCircuit::ScopedCircuitInstruction op(copied, i);
         circuit.measure_map_.push_back(std::pair<uint_t, uint_t>(
             (uint_t)op.get().qubits[0], (uint_t)op.get().clbits[0]));
-        continue;
-      }
-      if (kind != QkOperationKind_Gate) {
-        continue;
-      }
-      QuantumCircuit::ScopedCircuitInstruction op(copied, i);
-      if (std::string(op.get().name) != "global_phase"
-          || op.get().num_params < 1) {
-        continue;
-      }
-      const double value = qk_param_as_real(op.get().params[0]);
-      // A symbolic phase has no double value; the authoritative value stays on
-      // the instruction and the cache is left alone.
-      if (!std::isnan(value)) {
-        circuit.global_phase_ = value;
-        phase_from_instruction = true;
-      }
-    }
-
-    if (!phase_from_instruction) {
-      const ScopedParam phase(qk_circuit_global_phase(copied));
-      const double phase_value = qk_param_as_real(phase.get());
-      if (!std::isnan(phase_value)) {
-        circuit.global_phase_ = phase_value;
       }
     }
   }

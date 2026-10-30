@@ -1263,6 +1263,10 @@ static int test_to_qasm3_cu3_definition(void) {
 }
 
 static int test_to_qasm3_global_phase(void) {
+    // The global phase is a property of the circuit, set through
+    // qk_circuit_set_global_phase, so the exporter reads it from the circuit
+    // rather than finding a global_phase instruction to iterate over. It is
+    // emitted after the register declarations and before the operations.
     auto qreg = QuantumRegister(1, std::string("q"));
     QuantumCircuit circ(std::vector<QuantumRegister>({qreg}), std::vector<ClassicalRegister>(), 0.5);
 
@@ -1281,6 +1285,121 @@ static int test_to_qasm3_global_phase(void) {
         return EqualityError;
     }
 
+    return Ok;
+}
+
+static int test_to_qasm3_global_phase_zero(void) {
+    // A zero phase is the identity, so nothing is emitted for it.
+    auto qreg = QuantumRegister(1, std::string("q"));
+    QuantumCircuit circ(std::vector<QuantumRegister>({qreg}), std::vector<ClassicalRegister>(), 0.0);
+
+    circ.h(0);
+
+    const auto actual = circ.to_qasm3();
+    const std::string expected =
+        "OPENQASM 3.0;\n"
+        "include \"stdgates.inc\";\n"
+        "qubit[1] q;\n"
+        "h q[0];\n";
+    if (actual != expected) {
+        std::cerr << "  to_qasm3_global_phase_zero test : \n    expected:\n" << expected
+            << "\n    actual:\n" << actual << std::endl;
+        return EqualityError;
+    }
+
+    // A circuit built without an explicit phase must behave the same way.
+    QuantumCircuit implicit(1, 0);
+    implicit.h(0);
+    if (implicit.to_qasm3() != expected) {
+        std::cerr << "  to_qasm3_global_phase_zero test : \n    expected:\n" << expected
+            << "\n    actual:\n" << implicit.to_qasm3() << std::endl;
+        return EqualityError;
+    }
+
+    return Ok;
+}
+
+static int test_to_qasm3_global_phase_setter(void) {
+    // Setting the phase after construction must replace it rather than
+    // accumulate, since it is a property and not an appended gate.
+    QuantumCircuit circ(1, 0, 0.25);
+    circ.global_phase(0.75);
+    circ.h(0);
+
+    const auto actual = circ.to_qasm3();
+    const std::string expected =
+        "OPENQASM 3.0;\n"
+        "include \"stdgates.inc\";\n"
+        "qubit[1] q;\n"
+        "gphase(0.75);\n"
+        "h q[0];\n";
+    if (actual != expected) {
+        std::cerr << "  to_qasm3_global_phase_setter test : \n    expected:\n" << expected
+            << "\n    actual:\n" << actual << std::endl;
+        return EqualityError;
+    }
+
+    if (circ.global_phase() != 0.75) {
+        std::cerr << "  to_qasm3_global_phase_setter test : the cached phase is "
+            << circ.global_phase().as_str() << ", expected 0.75" << std::endl;
+        return EqualityError;
+    }
+    return Ok;
+}
+
+static int test_to_qasm3_global_phase_parameter(void) {
+    // An unbound phase has no numeric value, so it is always emitted and is
+    // declared as an input alongside the gate parameters.
+    QuantumCircuit circ(1, 0);
+    auto theta = Parameter("theta");
+    circ.global_phase(theta);
+    circ.h(0);
+
+    const auto symbols = circ.parameter_symbols();
+    if (symbols.size() != 1 || symbols[0] != "theta") {
+        std::cerr << "  to_qasm3_global_phase_parameter test : harvested " << symbols.size()
+            << " symbols, expected just \"theta\"" << std::endl;
+        return EqualityError;
+    }
+
+    const auto actual = circ.to_qasm3();
+    const std::string expected =
+        "OPENQASM 3.0;\n"
+        "include \"stdgates.inc\";\n"
+        "input float[64] theta;\n"
+        "qubit[1] q;\n"
+        "gphase(theta);\n"
+        "h q[0];\n";
+    if (actual != expected) {
+        std::cerr << "  to_qasm3_global_phase_parameter test : \n    expected:\n" << expected
+            << "\n    actual:\n" << actual << std::endl;
+        return EqualityError;
+    }
+    return Ok;
+}
+
+static int test_to_qasm3_global_phase_gate(void) {
+    // A GlobalPhaseGate appended as an instruction is still emitted in
+    // sequence, which is a separate path from the circuit property above.
+    QuantumCircuit circ(1, 0);
+    circ.h(0);
+
+    auto gate = GlobalPhaseGate();
+    gate.set_params(std::vector<Parameter>({Parameter(0.5)}));
+    circ.append(gate, reg_t());
+
+    const auto actual = circ.to_qasm3();
+    const std::string expected =
+        "OPENQASM 3.0;\n"
+        "include \"stdgates.inc\";\n"
+        "qubit[1] q;\n"
+        "h q[0];\n"
+        "gphase(0.5);\n";
+    if (actual != expected) {
+        std::cerr << "  to_qasm3_global_phase_gate test : \n    expected:\n" << expected
+            << "\n    actual:\n" << actual << std::endl;
+        return EqualityError;
+    }
     return Ok;
 }
 
@@ -2082,6 +2201,10 @@ int test_circuit(int argc, char** argv) {
     num_failed += RUN_TEST(test_to_qasm3_cu1_definition);
     num_failed += RUN_TEST(test_to_qasm3_cu3_definition);
     num_failed += RUN_TEST(test_to_qasm3_global_phase);
+    num_failed += RUN_TEST(test_to_qasm3_global_phase_zero);
+    num_failed += RUN_TEST(test_to_qasm3_global_phase_setter);
+    num_failed += RUN_TEST(test_to_qasm3_global_phase_parameter);
+    num_failed += RUN_TEST(test_to_qasm3_global_phase_gate);
     num_failed += RUN_TEST(test_to_qasm3_physical_qubits);
 #if QISKIT_CPP_HAS_QPY
     num_failed += RUN_TEST(test_to_qpy);
