@@ -116,7 +116,23 @@ QISKIT_IBM_TOKEN=<your API key>
 QISKIT_IBM_INSTANCE=<your CRN>
 ```
 
-The estimator interface is available through `primitives::BackendEstimatorV2` and currently requires QRMI or another backend that implements `BackendV2::run(std::vector<EstimatorPub>&, double)`. Estimator PUB circuits must be unmeasured and can use Pauli labels, Pauli-label maps, Pauli term vectors, or `quantum_info::SparseObservable` inputs. Empty observables are rejected before backend submission, and malformed estimator result cardinality is rejected while reading provider results. Estimator job cancellation is not currently supported, so `BackendEstimatorJob::cancel()` returns `false`.
+The estimator interface is available through `primitives::BackendEstimatorV2` and currently requires QRMI or another backend that implements `BackendV2::run(std::vector<EstimatorPub>&, double)`. Estimator PUB circuits must be unmeasured and can use Pauli labels, Pauli-label maps, Pauli term vectors, or `quantum_info::SparseObservable` inputs. Empty observables are rejected before backend submission, and malformed estimator result cardinality is rejected while reading provider results. Estimator job cancellation is not currently supported, so `BackendEstimatorJob::cancel()` returns `false`. (`providers::QRMIJob::cancel()` does request cancellation from QRMI, but the primitive job wrappers do not yet call it.)
+
+#### QRMI resource types
+
+The QRMI interfaces require **QRMI 0.13.0 or later**. QRMI 0.13 added the `ibm-quantum-system` and `pasqal-local` resource types, which renumbered the `QrmiResourceType` enum, so older QRMI releases are not supported.
+
+`QiskitRuntimeService` connects through `QRMI_RESOURCE_TYPE_QISKIT_RUNTIME_SERVICE` by default. Call `set_resource_type()` to select another, and `set_url()` / `set_iam_url()` to point at a different endpoint:
+
+| Resource type | Environment variable prefix |
+| ---- | ---- |
+| `QRMI_RESOURCE_TYPE_QISKIT_RUNTIME_SERVICE` | `<backend>_QRMI_IBM_QRS_` |
+| `QRMI_RESOURCE_TYPE_IBM_QUANTUM_SYSTEM` | `<backend>_QRMI_IBM_QS_` |
+| `QRMI_RESOURCE_TYPE_IBM_DIRECT_ACCESS` | `<backend>_QRMI_IBM_DA_` (deprecated by QRMI) |
+
+The `ENDPOINT`, `IAM_ENDPOINT`, `IAM_APIKEY` and `SERVICE_CRN` variables are set for you from the account information above. `SESSION_MODE` is set only for Qiskit Runtime Service, which is the only type with a session concept. The AWS/S3 variables that IBM Quantum System uses to deliver results (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `S3_ENDPOINT`, `S3_BUCKET`, `S3_REGION`) have no counterpart in `QiskitRuntimeService` and must be exported yourself. The Pasqal resource types are not supported through `QiskitRuntimeService`.
+
+Jobs now run inside an acquired QRMI session, so `set_session_mode("batch")` or `set_session_mode("dedicated")` takes effect. The session is opened when the first job is submitted — constructing a backend only to transpile does not open one — and closed when the backend and all of its jobs are released. `QRMIBackend::acquire_session()` and `release_session()` control it explicitly if needed.
 
 To run the sample example with SQC, you also need to set the library options to the environment variable `SQC_LIBS`, which is automatically set by a provided script (see [here](https://github.com/jhpc-quantum/documents/blob/main/SQC_JHPC_Quantum_user_guide.md)), before running cmake. In SQC 0.10.0, `backend_setup.sh` configures `SQC_LIBS` as follows:
 

@@ -20,8 +20,7 @@
 
 #include "circuit/quantumcircuit_def.hpp"
 #include "circuit/qasm3_exporter.hpp"
-#include "circuit/qpy_exporter.hpp"
-#include "circuit/qpy_importer.hpp"
+#include "circuit/qpy.hpp"
 #include "circuit/quantumcircuit_impl.hpp"
 
 #endif  // __qiskitcpp_circuit_quantum_circuit_hpp__

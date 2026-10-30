@@ -23,6 +23,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <limits>
 
 #include "circuit/quantumcircuit_def.hpp"
 #include "utils/capi_features.hpp"
